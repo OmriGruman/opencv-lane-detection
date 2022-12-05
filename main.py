@@ -1,6 +1,7 @@
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+from random import shuffle
 
 
 def print_img(image,name="image"):
@@ -50,11 +51,11 @@ def preprocess_frames(raw_frames):
             # Normalize colors? 
             # Intensify dark color?
             # Contrast?
-    h, w, c = res_frames.shape
-    top = h*65//100
+    height, width, channel = res_frames.shape
+    top = height*65//100
 
     # crop 
-    cropped = raw_frames[top:, :, :]
+    cropped = res_frames[top:, :, :]
     #print_img(cropped, 'crop')
 
     # detect white lines
@@ -67,10 +68,11 @@ def preprocess_frames(raw_frames):
     #print_img(eroded_frame, 'erode')
 
     # stay with minimal lines
-    for row in range(eroded_frame.shape[0]):
+    squashed_frame = filtered_frame
+    for row in range(squashed_frame.shape[0]):
         ids = [[]]
-        for col in range(eroded_frame.shape[1]):
-            if eroded_frame[row, col] > 0:
+        for col in range(squashed_frame.shape[1]):
+            if squashed_frame[row, col] > 0:
                 if len(ids[-1]) > 0:
                     if col - ids[-1][-1] > 10:
                         ids.append([])
@@ -79,62 +81,64 @@ def preprocess_frames(raw_frames):
         if len(ids[-1]) > 0:
             for ii in ids:
                 mid = (ii[0] + ii[-1]) // 2
-                eroded_frame[row, ii] = 0
-                eroded_frame[row, mid:mid+1] = 255
-    #print_img(eroded_frame, 'shrink')
+                squashed_frame[row, ii] = 0
+                squashed_frame[row, mid:mid+1] = 255
+    #print_img(squashed_frame, 'squash')
 
-    for th in range(10, 3, -1):
-        lines = cv2.HoughLines(eroded_frame, 1, np.pi / 180, th)
+    # RANSAC
+    points = np.argwhere(squashed_frame)
+    d_th = 2
+    lines = []
+    for i in range(100):
+        p1, p2 = np.random.choice(points.shape[0], size=2, replace=False)
+        (y1, x1), (y2, x2) = points[[p1, p2]]
 
-        if lines is not None:
-            lines = sorted(lines[:, 0, :], key=lambda line: line[1])
-            lines = list(filter(lambda line: 35 > abs(line[1]*180/np.pi - 90) > 5, lines))   
+        inliers = []
+        for y0, x0 in points:
+            d = np.linalg.norm(np.cross((x1 - x0, y1 - y0), (x2 - x1, y2 - y1))) / np.linalg.norm((x2 - x1, y2 - y1))
+            if d <= d_th:
+                inliers.append([x0, y0])
 
-            # count lines for each side
-            left_lines = list(filter(lambda line: line[1] < (np.pi / 2), lines))
-            num_left = len(left_lines)
-            right_lines = list(filter(lambda line: line[1] > (np.pi / 2), lines))
-            num_right = len(right_lines)
-            
-            # choose best lines
-            if num_left > 5:
-                
-                if last_left is None:
-                    left_line = left_lines[num_left//2]
-                elif len(left_lines) == 0:
-                    left_line = last_left
-                else:
-                    left_line = sorted(left_lines, key=lambda line: abs(line[1] - last_left[1]))[0]
+        if len(inliers) < 10: continue
 
-            if num_right > 5:
-                if last_right is None:
-                    right_line = right_lines[num_left//2]
-                elif len(right_lines) == 0:
-                    right_line = last_right
-                else:
-                    right_line = sorted(right_lines, key=lambda line: abs(line[1] - last_right[1]))[0]
+        inliers = np.array(inliers)
+        X = np.concatenate((inliers[:, 0].reshape(-1, 1), np.ones((inliers.shape[0], 1))), axis=1)
+        Y = inliers[:, 1].reshape(-1, 1)        
+        w, b = np.linalg.lstsq(X, Y, rcond=None)[0].flatten()
 
-                last_left = left_line
-                last_right = right_line
-                break
+        if abs(w) < 0.3: continue
+        if w > 0 and (-b/w) < 210: continue
+        if w < 0 and (-b/w) > 210: continue
 
-    left_line = last_left
-    right_line = last_right
+        # if different from all lines up to this moment
+        if all([abs(w0 - w) > 0.1 or abs(b0 - b) > 10 for w0, b0, _ in lines]):
+            lines.append([w, b, inliers.shape[0]])
 
-    if lines is not None:
-        all_lines = cropped.copy()
-        for rho, theta in lines:
-            a = np.cos(theta)
-            b = np.sin(theta)
-            x0 = a * rho
-            y0 = b * rho
-            x1 = int(x0 + 2000 * (-b))
-            y1 = int(y0 + 2000 * (a))
-            x2 = int(x0 - 2000 * (-b))
-            y2 = int(y0 - 2000 * (a))
-            all_lines = cv2.line(all_lines, (x1, y1), (x2, y2), (0, 0, 255), thickness=1)
-        #print_img(all_lines, f'th:{th}, lines:{len(lines)}')
+    lines = sorted(lines, key=lambda line: -line[2])    
+    #print('\n'.join(list(map(str, lines))))    
 
+    right_lines = list(filter(lambda l: l[0] > 0, lines))
+    left_lines = list(filter(lambda l: l[0] < 0, lines))
+
+    if len(left_lines) > 0:
+        left_lines = sorted(left_lines, key=lambda l: l[1]/l[0])
+        last_left = left_lines[0]
+
+    if len(right_lines) > 0:
+        right_lines = sorted(right_lines, key=lambda l: -l[1]/l[0])
+        last_right = right_lines[0]
+
+    # draw lines
+    for m, n, num_inliers in [last_left, last_right]:
+        x1 = 0
+        y1 = round(m * x1 + n)
+        x2 = cropped.shape[1] - 1
+        y2 = round(m * x2 + n)
+        cropped = cv2.line(cropped, (x1, y1), (x2, y2), (0, 255, 0), thickness=1)
+        #print(f'line: y = {m:.2f}x + {n:.2f}, inliers{num_inliers}, lines:{len(lines)}')
+        #print_img(all_lines, f'line: y = {m:.2f}x + {n:.2f}, inliers{num_inliers}, lines:{len(lines)}')
+    #print_img(res_frames, f'lines: {len(lines)}')
+    '''
     for rho, theta in [left_line, right_line]:
         a = np.cos(theta)
         b = np.sin(theta)
@@ -146,7 +150,9 @@ def preprocess_frames(raw_frames):
         y2 = int(y0 - 2000 * (a))
         cropped = cv2.line(cropped, (x1, y1), (x2, y2), (0, 0, 255), thickness=1)
     #print_img(cropped, f'final')
+    '''
 
+    res_frames[top:, :, :] = cropped
     return res_frames
 
 
