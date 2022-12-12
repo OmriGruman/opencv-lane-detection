@@ -57,7 +57,7 @@ def draw_lane(img, left, right):
     bottom_right = [(img.shape[0] - 1 - nr) / mr, img.shape[0] - 1]
     bottom_left = [(img.shape[0] - 1 - nl) / ml, img.shape[0] - 1]
 
-    points = [top_left, top_right, bottom_right, bottom_left]
+    points = np.round([[top_left, top_right, bottom_right, bottom_left]]).astype(int)
     cv2.fillPoly(lane, np.round([points]).astype(int), color=[255, 255, 255])
     
     lane_mask = lane > 0    
@@ -83,7 +83,20 @@ def squash_lanes(img):
                 img[row, mid] = 1
     return img
 
+
+def poly_crop(img):
+    poly_mask = np.zeros_like(img)
+    mask_value = 255
     
+    top_left = (260, 0)
+    top_right = (590, 0)
+    bottom_right = (img.shape[1], img.shape[0])
+    bottom_left = (0, img.shape[0])
+
+    points = np.array([[top_left, top_right, bottom_right, bottom_left]], dtype=np.int32)
+    cv2.fillPoly(poly_mask, points, mask_value)
+
+    return cv2.bitwise_and(img, poly_mask)
 
 
 prev_right = None
@@ -113,22 +126,20 @@ def preprocess_frames(raw_frames):
     filtered_frame = cv2.inRange(cropped, np.array([180, 180, 180]), np.array([250, 250, 250]))
     #print_img(filtered_frame, 'filter')
 
-    #print_img(filtered_frame)
-
     # erode
     eroded_frame = cv2.erode(filtered_frame, np.ones((3,3)))
-
-    # res_frames[top:, :, 0] = eroded_frame
-    # res_frames[top:, :, 1] = eroded_frame
-    # res_frames[top:, :, 2] = eroded_frame
-    # return res_frames
+    #print_img(squashed_frame, 'erode')
 
     # stay with minimal lines
-    squashed_frame = squash_lanes(filtered_frame)
+    squashed_frame = squash_lanes(eroded_frame)
     #print_img(squashed_frame, f'squash: {np.sum(squashed_frame)} pixels')
 
+    # polygon crop
+    poly_frame = poly_crop(squashed_frame)
+    #print_img(squashed_frame, f'poly: {np.sum(poly_frame)} pixels')
+
     # RANSAC
-    points = np.argwhere(squashed_frame)
+    points = np.argwhere(poly_frame)
     d_th = 1
     right_found = False
     left_found = False
@@ -188,7 +199,6 @@ def preprocess_frames(raw_frames):
     # TODO: detect start of transition 
     # TODO: handle transition process
     # TODO: detect end of transition
-
 
     cropped = draw_line(cropped, right_line[:2])
     cropped = draw_line(cropped, left_line[:2])
