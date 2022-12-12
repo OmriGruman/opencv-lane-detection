@@ -11,23 +11,23 @@ def print_img(image,name="image"):
     plt.show()
 
 
-def read_frames_from_video(video_path, num_seconds=30):
+def read_frames_from_video(video_path, start, finish):
     frames = list()
     capture = cv2.VideoCapture(video_path)
     fps = int(capture.get(cv2.CAP_PROP_FPS))
-    total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))    
 
-    if num_seconds * fps > total_frames:
-        print(f'Cannot read {num_seconds} seconds from video...')
-
-    num_frames = min(num_seconds * fps, total_frames)
+    start_frame = start * fps
+    finish_frame = finish * fps
+    num_frames =  finish_frame - start_frame
     num_seconds = num_frames / fps
 
     print(f"Start reading {num_frames} frames ({num_seconds:.2f} seconds) from {video_path} ({fps} fps)")
 
+    capture.set(cv2.CAP_PROP_POS_MSEC, start * 1000)
+
     for i in range(num_frames):
         image = capture.read()[1]
-        image = cv2.resize(image, (0, 0), fx=0.5, fy=0.5)
         frames.append(image)
     capture.release()
 
@@ -35,12 +35,63 @@ def read_frames_from_video(video_path, num_seconds=30):
 
     return frames, fps
 
-last_left = None
-last_right = None
+
+def draw_line(img, line):
+    m, n = line
+    x1 = 0
+    y1 = round(m * x1 + n)
+    x2 = img.shape[1] - 1
+    y2 = round(m * x2 + n)
+    return cv2.line(img, (x1, y1), (x2, y2), (0, 255, 0), thickness=1)
+    
+
+def draw_lane(img, left, right):
+    lane = img.copy()
+    lane[:,:,:] = 0
+
+    ml, nl = left
+    mr, nr = right
+
+    top_left = [-nl / ml, 0]
+    top_right = [-nr / mr, 0]
+    bottom_right = [(img.shape[0] - 1 - nr) / mr, img.shape[0] - 1]
+    bottom_left = [(img.shape[0] - 1 - nl) / ml, img.shape[0] - 1]
+
+    points = [top_left, top_right, bottom_right, bottom_left]
+    cv2.fillPoly(lane, np.round([points]).astype(int), color=[255, 255, 255])
+    
+    lane_mask = lane > 0    
+    img[:, :, 1][lane_mask[:, :, 1]] = 255
+
+    return img
+
+
+def squash_lanes(img):
+    for row in range(img.shape[0]):
+        ids = [[]]
+        for col in range(img.shape[1]):
+            if img[row, col] > 0:
+                if len(ids[-1]) > 0:
+                    if col - ids[-1][-1] > 10:
+                        ids.append([])
+                ids[-1].append(col)
+        
+        if len(ids[-1]) > 0:
+            for ii in ids:
+                mid = (ii[0] + ii[-1]) // 2
+                img[row, ii] = 0
+                img[row, mid] = 1
+    return img
+
+    
+
+
+prev_right = None
+prev_left = None
 
 def preprocess_frames(raw_frames):
-    global last_left
-    global last_right
+    global prev_left
+    global prev_right
 
     res_frames = raw_frames
     # Ideas:
@@ -52,7 +103,7 @@ def preprocess_frames(raw_frames):
             # Intensify dark color?
             # Contrast?
     height, width, channel = res_frames.shape
-    top = height*65//100
+    top = height*62//100
 
     # crop 
     cropped = res_frames[top:, :, :]
@@ -62,97 +113,92 @@ def preprocess_frames(raw_frames):
     filtered_frame = cv2.inRange(cropped, np.array([180, 180, 180]), np.array([250, 250, 250]))
     #print_img(filtered_frame, 'filter')
 
-    # avoid irrelevant lanes
-    e_kernel = np.ones((3,1))
-    eroded_frame = cv2.erode(filtered_frame, e_kernel)
-    #print_img(eroded_frame, 'erode')
+    #print_img(filtered_frame)
+
+    # erode
+    eroded_frame = cv2.erode(filtered_frame, np.ones((3,3)))
+
+    # res_frames[top:, :, 0] = eroded_frame
+    # res_frames[top:, :, 1] = eroded_frame
+    # res_frames[top:, :, 2] = eroded_frame
+    # return res_frames
 
     # stay with minimal lines
-    squashed_frame = filtered_frame
-    for row in range(squashed_frame.shape[0]):
-        ids = [[]]
-        for col in range(squashed_frame.shape[1]):
-            if squashed_frame[row, col] > 0:
-                if len(ids[-1]) > 0:
-                    if col - ids[-1][-1] > 10:
-                        ids.append([])
-                ids[-1].append(col)
-        
-        if len(ids[-1]) > 0:
-            for ii in ids:
-                mid = (ii[0] + ii[-1]) // 2
-                squashed_frame[row, ii] = 0
-                squashed_frame[row, mid:mid+1] = 255
-    #print_img(squashed_frame, 'squash')
+    squashed_frame = squash_lanes(filtered_frame)
+    #print_img(squashed_frame, f'squash: {np.sum(squashed_frame)} pixels')
 
     # RANSAC
     points = np.argwhere(squashed_frame)
-    d_th = 2
-    lines = []
+    d_th = 1
+    right_found = False
+    left_found = False
+    right_line = None
+    left_line = None
+
+    #while not right_found or not left_found:
     for i in range(100):
         p1, p2 = np.random.choice(points.shape[0], size=2, replace=False)
         (y1, x1), (y2, x2) = points[[p1, p2]]
-
         inliers = []
-        for y0, x0 in points:
+        inds = []
+
+        for i, (y0, x0) in enumerate(points):
             d = np.linalg.norm(np.cross((x1 - x0, y1 - y0), (x2 - x1, y2 - y1))) / np.linalg.norm((x2 - x1, y2 - y1))
             if d <= d_th:
                 inliers.append([x0, y0])
+                inds.append(i)
 
+        # focus on lines that fit well in a line
         if len(inliers) < 10: continue
 
+        # fit line to all inliers
         inliers = np.array(inliers)
         X = np.concatenate((inliers[:, 0].reshape(-1, 1), np.ones((inliers.shape[0], 1))), axis=1)
         Y = inliers[:, 1].reshape(-1, 1)        
         w, b = np.linalg.lstsq(X, Y, rcond=None)[0].flatten()
 
+        # filter by slope and x-axis intersect
         if abs(w) < 0.3: continue
-        if w > 0 and (-b/w) < 210: continue
-        if w < 0 and (-b/w) > 210: continue
+        if w > 0 and (-b/w) < ((width * 48) // 100): continue
+        if w < 0 and (-b/w) > ((width * 52) // 100): continue
 
-        # if different from all lines up to this moment
-        if all([abs(w0 - w) > 0.1 or abs(b0 - b) > 10 for w0, b0, _ in lines]):
-            lines.append([w, b, inliers.shape[0]])
+        # right lane
+        if w > 0:
+            if not right_found or len(inliers) > right_line[2]:
+                right_found = True
+                right_line = [w, b, len(inliers)]
+        # left lane
+        else:
+            if not left_found or len(inliers) > left_line[2]:
+                left_found = True
+                left_line = [w, b, len(inliers)]
 
-    lines = sorted(lines, key=lambda line: -line[2])    
-    #print('\n'.join(list(map(str, lines))))    
+    # filter lines with bad orientation (accidental lines)
+    if prev_left:
+        if (left_line == None or 
+            (left_line[0] > prev_left[0] and -left_line[1]/left_line[0] > -prev_left[1]/prev_left[0] + 10) or
+            (left_line[0] < prev_left[0] and -left_line[1]/left_line[0] < -prev_left[1]/prev_left[0] - 10)):
+            left_line = prev_left
+    if prev_right:
+        if (right_line == None or 
+            (right_line[0] > prev_right[0] and -right_line[1]/right_line[0] > -prev_right[1]/prev_right[0] + 10) or
+            (right_line[0] < prev_right[0] and -right_line[1]/right_line[0] < -prev_right[1]/prev_right[0] - 10)):
+            right_line = prev_right
 
-    right_lines = list(filter(lambda l: l[0] > 0, lines))
-    left_lines = list(filter(lambda l: l[0] < 0, lines))
+    # TODO: detect start of transition 
+    # TODO: handle transition process
+    # TODO: detect end of transition
 
-    if len(left_lines) > 0:
-        left_lines = sorted(left_lines, key=lambda l: l[1]/l[0])
-        last_left = left_lines[0]
 
-    if len(right_lines) > 0:
-        right_lines = sorted(right_lines, key=lambda l: -l[1]/l[0])
-        last_right = right_lines[0]
+    cropped = draw_line(cropped, right_line[:2])
+    cropped = draw_line(cropped, left_line[:2])
+    cropped = draw_lane(cropped, left_line[:2], right_line[:2])
 
-    # draw lines
-    for m, n, num_inliers in [last_left, last_right]:
-        x1 = 0
-        y1 = round(m * x1 + n)
-        x2 = cropped.shape[1] - 1
-        y2 = round(m * x2 + n)
-        cropped = cv2.line(cropped, (x1, y1), (x2, y2), (0, 255, 0), thickness=1)
-        #print(f'line: y = {m:.2f}x + {n:.2f}, inliers{num_inliers}, lines:{len(lines)}')
-        #print_img(all_lines, f'line: y = {m:.2f}x + {n:.2f}, inliers{num_inliers}, lines:{len(lines)}')
-    #print_img(res_frames, f'lines: {len(lines)}')
-    '''
-    for rho, theta in [left_line, right_line]:
-        a = np.cos(theta)
-        b = np.sin(theta)
-        x0 = a * rho
-        y0 = b * rho
-        x1 = int(x0 + 2000 * (-b))
-        y1 = int(y0 + 2000 * (a))
-        x2 = int(x0 - 2000 * (-b))
-        y2 = int(y0 - 2000 * (a))
-        cropped = cv2.line(cropped, (x1, y1), (x2, y2), (0, 0, 255), thickness=1)
-    #print_img(cropped, f'final')
-    '''
+    prev_left = left_line
+    prev_right = right_line
 
     res_frames[top:, :, :] = cropped
+    #print_img(res_frames, 'frame')
     return res_frames
 
 
@@ -190,9 +236,12 @@ def save_frames_to_video(frames, fps):
 if __name__ == '__main__':
 
     input_video_path = 'video1.mp4'    
-    raw_frames, fps = read_frames_from_video(input_video_path)
+    raw_frames, fps = read_frames_from_video(input_video_path, 18, 58)
+    print(f'[{time() - start:.2f}]')
 
     preprocessed_frames = [preprocess_frames(frame) for frame in raw_frames]
     final_frames = detect_lanes(preprocessed_frames)
+    print(f'[{time() - start:.2f}]')
 
     save_frames_to_video(final_frames, fps)
+    print(f'[{time() - start:.2f}]')
