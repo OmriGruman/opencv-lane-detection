@@ -2,6 +2,20 @@ import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 from random import shuffle
+from time import time 
+
+start = time()
+
+class Line:
+    def __init__(self, m, n, inliers):
+        self.slope = m
+        self.y_intercept = n
+        self.inliers = inliers
+        self.x_intercept = -n / m
+        self.num_inliers = len(inliers)
+    
+    def get_raw_line():
+        return [self.slope, self.y_intercept]
 
 
 def print_img(image,name="image"):
@@ -66,13 +80,28 @@ def draw_lane(img, left, right):
     return img
 
 
-def squash_lanes(img):
+def area_between(line1, line2, imshape):
+    (m1, n1), (m2, n2) = line1, line2
+
+    top_left = [-n1 / m1, 0]
+    top_right = [-n2 / m2, 0]
+    bottom_right = [(imshape[0] - 1 - n2) / m2, imshape[0] - 1]
+    bottom_left = [(imshape[0] - 1 - n1) / m1, imshape[0] - 1]
+
+    poly_mask = np.zeros(imshape[:2])
+    points = np.round([[top_left, top_right, bottom_right, bottom_left]]).astype(int)
+    cv2.fillPoly(poly_mask, points, 1)
+
+    return np.sum(poly_mask)
+
+
+def squash_lanes(img, max_dist):
     for row in range(img.shape[0]):
         ids = [[]]
         for col in range(img.shape[1]):
             if img[row, col] > 0:
                 if len(ids[-1]) > 0:
-                    if col - ids[-1][-1] > 10:
+                    if col - ids[-1][-1] > max_dist:
                         ids.append([])
                 ids[-1].append(col)
         
@@ -80,7 +109,7 @@ def squash_lanes(img):
             for ii in ids:
                 mid = (ii[0] + ii[-1]) // 2
                 img[row, ii] = 0
-                img[row, mid] = 1
+                img[row, mid] = 255
     return img
 
 
@@ -107,6 +136,7 @@ def preprocess_frames(raw_frames):
     global prev_right
 
     res_frames = raw_frames
+    #print_img(res_frames)
     # Ideas:
         # Crop image
         # Filter only certain color pixels
@@ -123,23 +153,18 @@ def preprocess_frames(raw_frames):
     #print_img(cropped, 'crop')
 
     # detect white lines
-    filtered_frame = cv2.inRange(cropped, np.array([180, 180, 180]), np.array([250, 250, 250]))
+    #filtered_frame = cv2.inRange(cropped, np.array([160, 160, 160]), np.array([250, 250, 250]))
     #print_img(filtered_frame, 'filter')
-
-    # erode
-    eroded_frame = cv2.erode(filtered_frame, np.ones((3,3)))
-    #print_img(squashed_frame, 'erode')
+    blur = cv2.GaussianBlur(cropped, (5,5), 0)
+    canny = cv2.Canny(blur, 120, 200)
+    polygon = poly_crop(canny)
 
     # stay with minimal lines
-    squashed_frame = squash_lanes(eroded_frame)
-    #print_img(squashed_frame, f'squash: {np.sum(squashed_frame)} pixels')
+    squash = squash_lanes(polygon, max_dist=30)
+    #print_img(squash, f'squash')
 
-    # polygon crop
-    poly_frame = poly_crop(squashed_frame)
-    #print_img(squashed_frame, f'poly: {np.sum(poly_frame)} pixels')
-
-    # RANSAC
-    points = np.argwhere(poly_frame)
+     # RANSAC
+    points = np.argwhere(squash)
     d_th = 1
     right_found = False
     left_found = False
@@ -160,7 +185,7 @@ def preprocess_frames(raw_frames):
                 inds.append(i)
 
         # focus on lines that fit well in a line
-        if len(inliers) < 10: continue
+        if len(inliers) < 20: continue
 
         # fit line to all inliers
         inliers = np.array(inliers)
@@ -246,7 +271,8 @@ def save_frames_to_video(frames, fps):
 if __name__ == '__main__':
 
     input_video_path = 'video1.mp4'    
-    raw_frames, fps = read_frames_from_video(input_video_path, 18, 58)
+    raw_frames, fps = read_frames_from_video(input_video_path, 48, 83)
+
     print(f'[{time() - start:.2f}]')
 
     preprocessed_frames = [preprocess_frames(frame) for frame in raw_frames]
