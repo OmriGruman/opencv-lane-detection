@@ -4,21 +4,11 @@ import numpy as np
 from random import shuffle
 from time import time 
 
-start = time()
-
-class Line:
-    def __init__(self, m, n, inliers):
-        self.slope = m
-        self.y_intercept = n
-        self.inliers = inliers
-        self.x_intercept = -n / m
-        self.num_inliers = len(inliers)
-    
-    def get_raw_line():
-        return [self.slope, self.y_intercept]
+start_time = time()
 
 
 def print_img(image,name="image"):
+    return
     plt.figure(figsize=(10, 10))
     plt.imshow(image)
     plt.title(name)
@@ -31,8 +21,8 @@ def read_frames_from_video(video_path, start, finish):
     fps = int(capture.get(cv2.CAP_PROP_FPS))
     total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))    
 
-    start_frame = start * fps
-    finish_frame = finish * fps
+    start_frame = int(start * fps)
+    finish_frame = int(finish * fps)
     num_frames =  finish_frame - start_frame
     num_seconds = num_frames / fps
 
@@ -52,10 +42,12 @@ def read_frames_from_video(video_path, start, finish):
 
 def draw_line(img, line):
     m, n = line
-    x1 = 0
-    y1 = round(m * x1 + n)
-    x2 = img.shape[1] - 1
-    y2 = round(m * x2 + n)
+
+    y1 = 0
+    x1 = round(m * y1 + n)
+    y2 = img.shape[0] - 1
+    x2 = round(m * y2 + n)
+
     return cv2.line(img, (x1, y1), (x2, y2), (0, 255, 0), thickness=1)
     
 
@@ -63,13 +55,17 @@ def draw_lane(img, left, right):
     lane = img.copy()
     lane[:,:,:] = 0
 
+    point = lambda y, m, n: [m * y + n, y]
+
     ml, nl = left
     mr, nr = right
+    y_top = 0
+    y_bottom = img.shape[0] - 1
 
-    top_left = [-nl / ml, 0]
-    top_right = [-nr / mr, 0]
-    bottom_right = [(img.shape[0] - 1 - nr) / mr, img.shape[0] - 1]
-    bottom_left = [(img.shape[0] - 1 - nl) / ml, img.shape[0] - 1]
+    top_left = point(y_top, ml, nl)
+    bottom_left = point(y_bottom, ml, nl)
+    top_right = point(y_top, mr, nr)
+    bottom_right = point(y_bottom, mr, nr)
 
     points = np.round([[top_left, top_right, bottom_right, bottom_left]]).astype(int)
     cv2.fillPoly(lane, np.round([points]).astype(int), color=[255, 255, 255])
@@ -78,21 +74,6 @@ def draw_lane(img, left, right):
     img[:, :, 1][lane_mask[:, :, 1]] = 255
 
     return img
-
-
-def area_between(line1, line2, imshape):
-    (m1, n1), (m2, n2) = line1, line2
-
-    top_left = [-n1 / m1, 0]
-    top_right = [-n2 / m2, 0]
-    bottom_right = [(imshape[0] - 1 - n2) / m2, imshape[0] - 1]
-    bottom_left = [(imshape[0] - 1 - n1) / m1, imshape[0] - 1]
-
-    poly_mask = np.zeros(imshape[:2])
-    points = np.round([[top_left, top_right, bottom_right, bottom_left]]).astype(int)
-    cv2.fillPoly(poly_mask, points, 1)
-
-    return np.sum(poly_mask)
 
 
 def squash_lanes(img, max_dist):
@@ -109,7 +90,7 @@ def squash_lanes(img, max_dist):
             for ii in ids:
                 mid = (ii[0] + ii[-1]) // 2
                 img[row, ii] = 0
-                img[row, mid] = 255
+                img[row, mid:mid+2] = 255
     return img
 
 
@@ -117,23 +98,37 @@ def poly_crop(img):
     poly_mask = np.zeros_like(img)
     mask_value = 255
     
-    top_left = (260, 0)
-    top_right = (590, 0)
-    bottom_right = (img.shape[1], img.shape[0])
-    bottom_left = (0, img.shape[0])
+    top_left = (310, 0)
+    top_right = (500, 0)
+    mid_right = (img.shape[1] - 1, 105)
+    mid_left = (0, 105)
+    bottom_right = (img.shape[1] - 1, img.shape[0] - 1)
+    bottom_left = (0, img.shape[0] - 1)
 
-    points = np.array([[top_left, top_right, bottom_right, bottom_left]], dtype=np.int32)
+    points = np.array([[
+        top_left, 
+        top_right,
+        mid_right, 
+        bottom_right, 
+        bottom_left, 
+        mid_left
+    ]], dtype=np.int32)
+    
     cv2.fillPoly(poly_mask, points, mask_value)
 
-    return cv2.bitwise_and(img, poly_mask)
+    return cv2.bitwise_and(img, poly_mask), poly_mask
 
 
 prev_right = None
 prev_left = None
+middle = None
+turn = 0
 
 def preprocess_frames(raw_frames):
     global prev_left
     global prev_right
+    global middle
+    global turn
 
     res_frames = raw_frames
     #print_img(res_frames)
@@ -152,12 +147,14 @@ def preprocess_frames(raw_frames):
     cropped = res_frames[top:, :, :]
     #print_img(cropped, 'crop')
 
-    # detect white lines
-    #filtered_frame = cv2.inRange(cropped, np.array([160, 160, 160]), np.array([250, 250, 250]))
-    #print_img(filtered_frame, 'filter')
+    # detect edges lines
     blur = cv2.GaussianBlur(cropped, (5,5), 0)
     canny = cv2.Canny(blur, 120, 200)
-    polygon = poly_crop(canny)
+    #print_img(canny, f'canny')
+
+    # crop polygon
+    polygon, poly_mask = poly_crop(canny)
+    #print_img(polygon, f'polygon')
 
     # stay with minimal lines
     squash = squash_lanes(polygon, max_dist=30)
@@ -165,13 +162,12 @@ def preprocess_frames(raw_frames):
 
      # RANSAC
     points = np.argwhere(squash)
-    d_th = 1
+    d_th = 3
     right_found = False
     left_found = False
     right_line = None
     left_line = None
 
-    #while not right_found or not left_found:
     for i in range(100):
         p1, p2 = np.random.choice(points.shape[0], size=2, replace=False)
         (y1, x1), (y2, x2) = points[[p1, p2]]
@@ -181,22 +177,29 @@ def preprocess_frames(raw_frames):
         for i, (y0, x0) in enumerate(points):
             d = np.linalg.norm(np.cross((x1 - x0, y1 - y0), (x2 - x1, y2 - y1))) / np.linalg.norm((x2 - x1, y2 - y1))
             if d <= d_th:
-                inliers.append([x0, y0])
+                inliers.append([y0, x0])
                 inds.append(i)
 
         # focus on lines that fit well in a line
         if len(inliers) < 20: continue
 
-        # fit line to all inliers
+        # fit line to all inliers, but according to inverse dimensions (y - horizontal axis, x - vertical axis)
         inliers = np.array(inliers)
+
         X = np.concatenate((inliers[:, 0].reshape(-1, 1), np.ones((inliers.shape[0], 1))), axis=1)
         Y = inliers[:, 1].reshape(-1, 1)        
         w, b = np.linalg.lstsq(X, Y, rcond=None)[0].flatten()
 
-        # filter by slope and x-axis intersect
-        if abs(w) < 0.3: continue
-        if w > 0 and (-b/w) < ((width * 48) // 100): continue
-        if w < 0 and (-b/w) > ((width * 52) // 100): continue
+        
+        # filter slopes in certain range
+        if abs(w) > 3.5: continue
+
+        # filter lines according to intersect
+        if middle:
+            # right lines
+            if w > 0 and b < (middle - 20): continue
+            # left lines
+            if w < 0 and b > (middle + 20): continue
 
         # right lane
         if w > 0:
@@ -212,28 +215,57 @@ def preprocess_frames(raw_frames):
     # filter lines with bad orientation (accidental lines)
     if prev_left:
         if (left_line == None or 
-            (left_line[0] > prev_left[0] and -left_line[1]/left_line[0] > -prev_left[1]/prev_left[0] + 10) or
-            (left_line[0] < prev_left[0] and -left_line[1]/left_line[0] < -prev_left[1]/prev_left[0] - 10)):
+            (left_line[0] > prev_left[0] and left_line[1] < prev_left[1] - 10) or
+            (left_line[0] < prev_left[0] and left_line[1] > prev_left[1] + 10)):
             left_line = prev_left
     if prev_right:
         if (right_line == None or 
-            (right_line[0] > prev_right[0] and -right_line[1]/right_line[0] > -prev_right[1]/prev_right[0] + 10) or
-            (right_line[0] < prev_right[0] and -right_line[1]/right_line[0] < -prev_right[1]/prev_right[0] - 10)):
+            (right_line[0] > prev_right[0] and right_line[1] < prev_right[1] - 10) or
+            (right_line[0] < prev_right[0] and right_line[1] > prev_right[1] + 10)):
             right_line = prev_right
 
+    #print(f'left: {left_line}')
+    #print(f'right: {right_line}')   
+
+    cropped[:,:,0][poly_mask > 0] = squash[poly_mask > 0]
+    cropped[:,:,1][poly_mask > 0] = squash[poly_mask > 0]
+    cropped[:,:,2][poly_mask > 0] = squash[poly_mask > 0]
+
     # TODO: detect start of transition 
+        # when slope is getting lower
+    if not turn and left_line[0] > -1:
+        turn = -1
+
+    if not turn and right_line[0] < 1:
+        turn = 1
+
     # TODO: handle transition process
+        # when slope goes back to normal (detects new lane line),
+        # adjust other lane to detect lines with slope close to 0
+    if turn:
+        text = "LEFT" if turn == -1 else "RIGHT"
+        cv2.putText(res_frames, text, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 
+                           1, (0, 255, 0), 1, cv2.LINE_AA)
+
     # TODO: detect end of transition
+        # when both lines have abs(slope) < 1.8
+    if turn and left_line[0] > -1.8 and right_line[0] < 1.8:
+        turn = 0
 
     cropped = draw_line(cropped, right_line[:2])
     cropped = draw_line(cropped, left_line[:2])
     cropped = draw_lane(cropped, left_line[:2], right_line[:2])
+    print_img(cropped, 'cropped')
+
 
     prev_left = left_line
     prev_right = right_line
 
+    if middle is None:
+        middle = (left_line[0] * right_line[1] - right_line[0] * left_line[1]) / (left_line[0] - right_line[0])
+
     res_frames[top:, :, :] = cropped
-    #print_img(res_frames, 'frame')
+    print_img(res_frames, 'frame')
     return res_frames
 
 
@@ -271,13 +303,23 @@ def save_frames_to_video(frames, fps):
 if __name__ == '__main__':
 
     input_video_path = 'video1.mp4'    
-    raw_frames, fps = read_frames_from_video(input_video_path, 48, 83)
+    start = 18
+    finish = 83
+    raw_frames, fps = read_frames_from_video(input_video_path, start, finish)
 
-    print(f'[{time() - start:.2f}]')
+    print(f'[{time() - start_time:.2f}]')
 
-    preprocessed_frames = [preprocess_frames(frame) for frame in raw_frames]
-    final_frames = detect_lanes(preprocessed_frames)
-    print(f'[{time() - start:.2f}]')
+    final_frames = []
+    num_frames = (finish - start) * fps
+    for i, frame in enumerate(raw_frames):
+        pframe = preprocess_frames(frame)
+        pframe = detect_lanes(pframe)
+        final_frames.append(pframe)
+
+        if i % 100 == 0:
+            print(f'[{time() - start_time:.2f}] {i}/{num_frames}')
+            
+    print(f'[{time() - start_time:.2f}]')
 
     save_frames_to_video(final_frames, fps)
-    print(f'[{time() - start:.2f}]')
+    print(f'[{time() - start_time:.2f}]')
