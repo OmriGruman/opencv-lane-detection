@@ -119,14 +119,28 @@ def poly_crop(img):
     return cv2.bitwise_and(img, poly_mask), poly_mask
 
 
+def left_filter(line, curr_left, prev_left):
+    return 
+
+
+def right_filter(line, curr_right, prev_right):
+    pass
+
+
 prev_right = None
 prev_left = None
+slope_border = 0
+slope_left = -3.5
+slope_right = 3.5
 middle = None
 turn = 0
 
 def preprocess_frames(raw_frames):
     global prev_left
     global prev_right
+    global slope_border
+    global slope_left
+    global slope_right
     global middle
     global turn
 
@@ -156,15 +170,16 @@ def preprocess_frames(raw_frames):
     polygon, poly_mask = poly_crop(canny)
     #print_img(polygon, f'polygon')
 
+
+
     # stay with minimal lines
-    squash = squash_lanes(polygon, max_dist=30)
+    squash = squash_lanes(polygon, max_dist=40)
     #print_img(squash, f'squash')
+
 
      # RANSAC
     points = np.argwhere(squash)
     d_th = 3
-    right_found = False
-    left_found = False
     right_line = None
     left_line = None
 
@@ -192,7 +207,7 @@ def preprocess_frames(raw_frames):
 
         
         # filter slopes in certain range
-        if abs(w) > 3.5: continue
+        if w < slope_left or w > slope_right: continue
 
         # filter lines according to intersect
         if middle:
@@ -202,13 +217,12 @@ def preprocess_frames(raw_frames):
             if w < 0 and b > (middle + 20): continue
 
         # right lane
-        if w > 0:
-            if not right_found or len(inliers) > right_line[2]:
-                right_found = True
+        if w > slope_border:
+            if right_line is None or len(inliers) > right_line[2]:
                 right_line = [w, b, len(inliers)]
         # left lane
         else:
-            if not left_found or len(inliers) > left_line[2]:
+            if left_line is None or len(inliers) > left_line[2]:
                 left_found = True
                 left_line = [w, b, len(inliers)]
 
@@ -224,48 +238,59 @@ def preprocess_frames(raw_frames):
             (right_line[0] < prev_right[0] and right_line[1] > prev_right[1] + 10)):
             right_line = prev_right
 
-    #print(f'left: {left_line}')
-    #print(f'right: {right_line}')   
-
-    cropped[:,:,0][poly_mask > 0] = squash[poly_mask > 0]
-    cropped[:,:,1][poly_mask > 0] = squash[poly_mask > 0]
-    cropped[:,:,2][poly_mask > 0] = squash[poly_mask > 0]
-
-    # TODO: detect start of transition 
+    # detect start of transition 
         # when slope is getting lower
-    if not turn and left_line[0] > -1:
+    if not turn and left_line[0] > -1 and right_line[0] > 2:
         turn = -1
 
-    if not turn and right_line[0] < 1:
+    if not turn and right_line[0] < 1 and left_line[0] < -2:
         turn = 1
 
-    # TODO: handle transition process
+    # handle transition process
         # when slope goes back to normal (detects new lane line),
         # adjust other lane to detect lines with slope close to 0
+    if slope_border == 0:
+        # detected new lane line
+        if turn == -1 and left_line[0] < -1.3:
+            slope_border = prev_left[0] - 0.1
+            right_line = prev_left
+            slope_right = 2
+        elif turn == 1 and right_line[0] > 1.3:
+            slope_border = prev_right[0] + 0.1
+            left_line = prev_right
+            slope_left = -2
+
     if turn:
+        # put transition text
         text = "LEFT" if turn == -1 else "RIGHT"
-        cv2.putText(res_frames, text, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 
+        cv2.putText(res_frames, text, (400, 50), cv2.FONT_HERSHEY_SIMPLEX, 
                            1, (0, 255, 0), 1, cv2.LINE_AA)
 
-    # TODO: detect end of transition
+
+    # detect end of transition
         # when both lines have abs(slope) < 1.8
     if turn and left_line[0] > -1.8 and right_line[0] < 1.8:
+        slope_border = 0
+        slope_left = -3.5
+        slope_right = 3.5
         turn = 0
 
     cropped = draw_line(cropped, right_line[:2])
     cropped = draw_line(cropped, left_line[:2])
     cropped = draw_lane(cropped, left_line[:2], right_line[:2])
-    print_img(cropped, 'cropped')
+    #print_img(cropped, 'cropped')
 
 
     prev_left = left_line
     prev_right = right_line
 
+    #print(prev_left, prev_right)
+
     if middle is None:
         middle = (left_line[0] * right_line[1] - right_line[0] * left_line[1]) / (left_line[0] - right_line[0])
 
     res_frames[top:, :, :] = cropped
-    print_img(res_frames, 'frame')
+    #print_img(res_frames, 'frame')
     return res_frames
 
 
@@ -302,9 +327,10 @@ def save_frames_to_video(frames, fps):
 
 if __name__ == '__main__':
 
-    input_video_path = 'video1.mp4'    
-    start = 18
-    finish = 83
+    input_video_path = 'video1.mp4'  
+    base = 18  
+    start = base + 2
+    finish = base + 36
     raw_frames, fps = read_frames_from_video(input_video_path, start, finish)
 
     print(f'[{time() - start_time:.2f}]')
