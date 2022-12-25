@@ -36,22 +36,13 @@ def print_img(img, name="image"):
 
 
 def read_frames_from_video(video_path):
-    start = 18
-    finish = 270
-
     frames = list()
     capture = cv2.VideoCapture(video_path)
     fps = int(capture.get(cv2.CAP_PROP_FPS))
-    total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))    
-
-    start_frame = int(start * fps)
-    finish_frame = int(finish * fps)
-    num_frames =  finish_frame - start_frame
+    num_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))    
     num_seconds = num_frames / fps
 
     print(f"Start reading {num_frames} frames ({num_seconds:.2f} seconds) from {video_path} ({fps} fps)")
-
-    capture.set(cv2.CAP_PROP_POS_MSEC, start * 1000)
 
     for i in range(num_frames):
         image = capture.read()[1]
@@ -61,6 +52,20 @@ def read_frames_from_video(video_path):
     print(f"Successfully read {len(frames)} frames from {video_path}")
 
     return frames, fps
+
+
+def save_frames_to_video(frames, fps, video_path):
+    codec = cv2.VideoWriter_fourcc(*"mp4v")
+    h, w = frames[0].shape[:2]
+    color = True
+    
+    writer = cv2.VideoWriter(video_path, codec, fps, (w, h), color)
+
+    print(f"Writing {len(frames)} frames to {video_path} ({fps} fps)")
+
+    for frame in frames:
+        writer.write(frame)
+    writer.release()
 
 
 def draw_line(img, line):
@@ -154,7 +159,7 @@ def polygon_mask(img):
     return cv2.bitwise_and(img, mask), mask
 
 
-def preprocess_frames(raw_frame):
+def preprocess_frame(raw_frame):
     height, _, _ = raw_frame.shape
     top = height * 62 // 100
     
@@ -181,7 +186,7 @@ def ransac_lines(points):
     left_line = None
     right_line = None
 
-    for i in range(num_samples):
+    for i in range(num_samples):    
 
         # sample random pair of pixels
         p1, p2 = np.random.choice(points.shape[0], size=2, replace=False)
@@ -195,34 +200,22 @@ def ransac_lines(points):
                 inliers.append([y0, x0])
 
         # focus on lines that fit well in a line
-        if len(inliers) < inliers_threshold: 
-            # TODO: print example 
-            continue
+        if len(inliers) < inliers_threshold: continue
 
         # fit line to all inliers, but according to inverse dimensions (y - horizontal axis, x - vertical axis)
         inliers = np.array(inliers)
         X = np.concatenate((inliers[:, 0].reshape(-1, 1), np.ones((inliers.shape[0], 1))), axis=1)
         Y = inliers[:, 1].reshape(-1, 1)        
         w, b = np.linalg.lstsq(X, Y, rcond=None)[0].flatten()
-        
-        # TODO: print all lines
 
         # filter slopes in certain range
-        if w < min_left_slope or w > max_right_slope:
-            # TODO: print example 
-            continue
-
-        # TODO: print all lines
+        if w < min_left_slope or w > max_right_slope: continue
 
         if middle_point:
             # positive slope with low intersect
-            if w > 0 and b < (middle_point - 20): 
-                # TODO: print example 
-                continue
+            if w > 0 and b < (middle_point - 20): continue
             # negative slope with high intersect
-            if w < 0 and b > (middle_point + 20): 
-                # TODO: print example 
-                continue
+            if w < 0 and b > (middle_point + 20): continue
 
         # select right lane
         if w > middle_slope:
@@ -232,7 +225,7 @@ def ransac_lines(points):
         elif left_line is None or len(inliers) > left_line[2]:
             left_line = [w, b, len(inliers)]
 
-    return left_line, right_line
+    return left_line[:2] if left_line else None, right_line[:2] if right_line else None
 
 
 def verify_lines(left_line, right_line):
@@ -247,8 +240,6 @@ def verify_lines(left_line, right_line):
             (left_line[0] < prev_left[0] and left_line[1] > prev_left[1] + 10) or 
             # new line cannot be too far from previous line
             (not transition and abs(left_line[1] - prev_left[1]) > 35)):
-            
-            # TODO: print example
 
             left = prev_left
 
@@ -260,28 +251,17 @@ def verify_lines(left_line, right_line):
             (right_line[0] < prev_right[0] and right_line[1] > prev_right[1] + 10) or
 
             # new line cannot be too far from previous line 
-            (not transition and abs(right_line[1] - prev_right[1]) > 35)):
-            
-            # TODO: print example 
+            (not transition and abs(right_line[1] - prev_right[1]) > 35)): 
 
             right = prev_right
     
     return left, right
 
 
-def detect_lanes(preprocessed_img, skip):
-    global prev_left
-    global prev_right
+def detect_lanes(preprocessed_frame):
     global middle_point
 
-    relevant_pixels = np.argwhere(preprocessed_img)
-
-    # skip frame
-    if skip:
-        # keep rolling our random generator as we move to next frame
-        for i in range(num_samples):
-            np.random.choice(points.shape[0], size=2, replace=False)
-        return False, None, None
+    relevant_pixels = np.argwhere(preprocessed_frame)
 
     # use RANSAC
     left_line, right_line = ransac_lines(points=relevant_pixels)
@@ -289,21 +269,24 @@ def detect_lanes(preprocessed_img, skip):
     # compare to previous lines
     left_line, right_line = verify_lines(left_line, right_line)
 
-    prev_left = left_line
-    prev_right = right_line
-
     # init middle point x coordinate (intersection between 2 lines)
     if middle_point is None:
         middle_point = (left_line[0] * right_line[1] - right_line[0] * left_line[1]) / (left_line[0] - right_line[0])
 
-    return True, left_line[:2], right_line[:2]
+    return True, left_line, right_line
 
 
-def detect_transition(img, left_line, right_line):
+def detect_transition(frame, left_line, right_line):
+    global prev_left
+    global prev_right
     global transition
     global middle_slope
     global min_left_slope
     global max_right_slope
+
+    new_lane = False
+    new_left = left_line
+    new_right = right_line
 
     # detect start of transition - slope is close to 0
     if not transition and left_line[0] > -1 and right_line[0] > 2:
@@ -322,7 +305,7 @@ def detect_transition(img, left_line, right_line):
             max_right_slope = 2
 
             # complete new lane
-            right_line = prev_left
+            new_right = prev_left
 
         # detect new right line - slope is "suddenly" significantly higher
         elif transition == 1 and right_line[0] > 1.2:
@@ -332,13 +315,7 @@ def detect_transition(img, left_line, right_line):
             min_left_slope = -2
 
             # complete new lane
-            left_line = prev_right
-
-    # draw text
-    if transition:
-        text = "LEFT" if transition == -1 else "RIGHT"
-        img = cv2.putText(img, text, (400, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 1, cv2.LINE_AA)
-
+            new_left = prev_right
 
     # detect end of transition - both slopes reach "normal" values
     if transition and left_line[0] > -1.8 and right_line[0] < 1.8:
@@ -349,22 +326,16 @@ def detect_transition(img, left_line, right_line):
         max_right_slope = 3.5
         transition = 0
 
-    return img
+    # draw text
+    if transition:
+        text = "LEFT" if transition == -1 else "RIGHT"
+        frame = cv2.putText(frame, text, (400, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 1, cv2.LINE_AA)
 
+    # Save lines for next frame
+    prev_left = left_line
+    prev_right = right_line 
 
-def save_frames_to_video(frames, fps):
-    video_path = 'lanes.mp4'
-    codec = cv2.VideoWriter_fourcc(*"mp4v")
-    h, w = frames[0].shape[:2]
-    color = True
-    
-    writer = cv2.VideoWriter(video_path, codec, fps, (w, h), color)
-
-    print(f"Writing {len(frames)} frames to {video_path} ({fps} fps)")
-
-    for frame in frames:
-        writer.write(frame)
-    writer.release()
+    return frame, new_left, new_right
 
 
 if __name__ == '__main__':
@@ -373,54 +344,35 @@ if __name__ == '__main__':
     np.random.seed(0)
 
     # video parameters
-    input_video_path = 'video1.mp4'
-    start = 0
-    finish = 1
+    input_video_path = 'original.mp4'
+    output_video_path = 'lanes.mp4'
     
     # read frames
     raw_frames, fps = read_frames_from_video(input_video_path)
 
-    final_frames = []
-    start_frame = start * fps
-    finish_frame = finish * fps
-    
-    # focusing only on the desired video section
-    raw_frames = raw_frames[:finish_frame]
-
     # process frame-by-frame
+    final_frames = []
     for i, frame in enumerate(raw_frames):
 
-        print_img(frame, 'Original')
-
-        # used to avoid detecting lanes on irrelevant frames
-        if i >= finish_frame: break
-        skip = i < start_frame
-
         # preprocess frame
-        cropped_frame, top, preprocessed_frame = preprocess_frames(frame)
+        cropped_frame, top, preprocessed_frame = preprocess_frame(frame)
 
         # detect lanes
-        relevant, left_line, right_line = detect_lanes(preprocessed_frame, skip)
+        relevant, left_line, right_line = detect_lanes(preprocessed_frame)
 
         # only collect relevant frames
         if relevant:
             
+            # detect transition, update lines if new lane captured
+            frame, left_line, right_line = detect_transition(frame, left_line, right_line)
+
             # draw lane
             cropped_frame = draw_line(cropped_frame, left_line)
             cropped_frame = draw_line(cropped_frame, right_line)
-            cropped_frame = draw_lane(cropped_frame, left_line, right_line)
+            frame[top:, :, :] = draw_lane(cropped_frame, left_line, right_line)    
 
-            # put lane onto original frame
-            frame[top:, :, :] = cropped_frame
-
-            # detect transition
-            frame = detect_transition(frame, left_line, right_line)
-
-            print_img(frame, 'Final result')
-
-            final_frames.append(frame)      
-
-    print_img(transition_frame, 'Transition')
+            # Collect processed frames
+            final_frames.append(frame) 
 
     # save lanes video
-    save_frames_to_video(final_frames, fps)
+    save_frames_to_video(raw_frames, fps, output_video_path)
