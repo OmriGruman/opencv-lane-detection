@@ -4,8 +4,6 @@ import numpy as np
 from random import shuffle
 from time import time 
 
-start_time = time()
-
 
 def print_img(image,name="image"):
     return
@@ -15,7 +13,10 @@ def print_img(image,name="image"):
     plt.show()
 
 
-def read_frames_from_video(video_path, start, finish):
+def read_frames_from_video(video_path):
+    start = 18
+    finish = 270
+
     frames = list()
     capture = cv2.VideoCapture(video_path)
     fps = int(capture.get(cv2.CAP_PROP_FPS))
@@ -100,8 +101,8 @@ def poly_crop(img):
     
     top_left = (310, 0)
     top_right = (500, 0)
-    mid_right = (img.shape[1] - 1, 105)
-    mid_left = (0, 105)
+    mid_right = (img.shape[1] - 1, 100)
+    mid_left = (0, 100)
     bottom_right = (img.shape[1] - 1, img.shape[0] - 1)
     bottom_left = (0, img.shape[0] - 1)
 
@@ -119,12 +120,26 @@ def poly_crop(img):
     return cv2.bitwise_and(img, poly_mask), poly_mask
 
 
-def left_filter(line, curr_left, prev_left):
-    return 
+def preprocess_frames(raw_frame, skip):
+    res_frame = raw_frame
 
+    height, _, _ = res_frame.shape
+    top = height * 62 // 100
+    
+    # crop 
+    cropped = res_frames[top:, :, :]
 
-def right_filter(line, curr_right, prev_right):
-    pass
+    # detect edges lines
+    blur = cv2.GaussianBlur(cropped, (5,5), 0)
+    canny = cv2.Canny(blur, 100, 200)
+
+    # crop polygon
+    polygon, poly_mask = poly_crop(canny)
+
+    # stay with minimal lines
+    squash = squash_lanes(img=polygon, max_dist=40)
+
+    return cropped, top, squash    
 
 
 prev_right = None
@@ -135,89 +150,46 @@ slope_right = 3.5
 middle = None
 turn = 0
 
-def preprocess_frames(raw_frames):
-    global prev_left
-    global prev_right
-    global slope_border
-    global slope_left
-    global slope_right
-    global middle
-    global turn
+num_samples = 100
+shoulder_threshold = 1.5
+inliers_threshold = 30
 
-    res_frames = raw_frames
-    #print_img(res_frames)
-    # Ideas:
-        # Crop image
-        # Filter only certain color pixels
-        # Dilate over lanes to connect broken lines into one lane (- - - -) -> (-------)
-        # How to deal with shades (going under bridge)?
-            # Normalize colors? 
-            # Intensify dark color?
-            # Contrast?
-    height, width, channel = res_frames.shape
-    top = height*62//100
+def ransac_lines(points, shoulder_size, min_inliers, min_left_slope, max_right_slope, middle_slope, vanishing_point):
 
-    # crop 
-    cropped = res_frames[top:, :, :]
-    #print_img(cropped, 'crop')
-
-    # detect edges lines
-    blur = cv2.GaussianBlur(cropped, (5,5), 0)
-    canny = cv2.Canny(blur, 120, 200)
-    #print_img(canny, f'canny')
-
-    # crop polygon
-    polygon, poly_mask = poly_crop(canny)
-    #print_img(polygon, f'polygon')
-
-
-
-    # stay with minimal lines
-    squash = squash_lanes(polygon, max_dist=40)
-    #print_img(squash, f'squash')
-
-
-     # RANSAC
-    points = np.argwhere(squash)
-    d_th = 3
-    right_line = None
-    left_line = None
-
-    for i in range(100):
+    for i in range(num_samples):
         p1, p2 = np.random.choice(points.shape[0], size=2, replace=False)
+
         (y1, x1), (y2, x2) = points[[p1, p2]]
         inliers = []
         inds = []
 
         for i, (y0, x0) in enumerate(points):
             d = np.linalg.norm(np.cross((x1 - x0, y1 - y0), (x2 - x1, y2 - y1))) / np.linalg.norm((x2 - x1, y2 - y1))
-            if d <= d_th:
+            if d <= shoulder_size:
                 inliers.append([y0, x0])
                 inds.append(i)
 
         # focus on lines that fit well in a line
-        if len(inliers) < 20: continue
+        if len(inliers) < min_inliers: continue
 
         # fit line to all inliers, but according to inverse dimensions (y - horizontal axis, x - vertical axis)
         inliers = np.array(inliers)
-
         X = np.concatenate((inliers[:, 0].reshape(-1, 1), np.ones((inliers.shape[0], 1))), axis=1)
         Y = inliers[:, 1].reshape(-1, 1)        
         w, b = np.linalg.lstsq(X, Y, rcond=None)[0].flatten()
-
         
         # filter slopes in certain range
-        if w < slope_left or w > slope_right: continue
+        if w < min_left_slope or w > max_right_slope: continue
 
         # filter lines according to intersect
-        if middle:
+        if vanishing_point:
             # right lines
-            if w > 0 and b < (middle - 20): continue
+            if w > 0 and b < (vanishing_point - 20): continue
             # left lines
-            if w < 0 and b > (middle + 20): continue
+            if w < 0 and b > (vanishing_point + 20): continue
 
         # right lane
-        if w > slope_border:
+        if w > middle_slope:
             if right_line is None or len(inliers) > right_line[2]:
                 right_line = [w, b, len(inliers)]
         # left lane
@@ -226,20 +198,70 @@ def preprocess_frames(raw_frames):
                 left_found = True
                 left_line = [w, b, len(inliers)]
 
-    # filter lines with bad orientation (accidental lines)
+
+def verify_lines(left_line, prev_left, right_line, prev_right):
+    left = left_line
+    right = right_line
+
     if prev_left:
         if (left_line == None or 
             (left_line[0] > prev_left[0] and left_line[1] < prev_left[1] - 10) or
-            (left_line[0] < prev_left[0] and left_line[1] > prev_left[1] + 10)):
-            left_line = prev_left
+            (left_line[0] < prev_left[0] and left_line[1] > prev_left[1] + 10) or 
+            (not turn and abs(left_line[1] - prev_left[1]) > 35)):
+            left = prev_left
     if prev_right:
         if (right_line == None or 
             (right_line[0] > prev_right[0] and right_line[1] < prev_right[1] - 10) or
-            (right_line[0] < prev_right[0] and right_line[1] > prev_right[1] + 10)):
-            right_line = prev_right
+            (right_line[0] < prev_right[0] and right_line[1] > prev_right[1] + 10) or 
+            (not turn and abs(right_line[1] - prev_right[1]) > 35)):
+            right = prev_right
+    
+    return left, right
 
+
+
+
+def detect_lanes(frame_mask):
+    global prev_left
+    global prev_right
+    global slope_border
+    global slope_left
+    global slope_right
+    global middle
+    global turn
+
+    relevant_pixels = np.argwhere(frame_mask)
+
+    if skip:
+        for i in range(num_samples):
+            np.random.choice(points.shape[0], size=2, replace=False)
+        return False, None, None
+
+    left_line, right_line = ransac_lines(points=relevant_pixels, 
+                                         shoulder_size=shoulder_threshold, 
+                                         min_inliers=inliers_threshold,
+                                         min_left_slope=slope_left,
+                                         max_right_slope=slope_right,
+                                         middle_slope=slope_border,
+                                         vanishing_point=middle)
+
+    left_line, right_line = verify_lines(left_line=left_line, 
+                                         prev_left=prev_left, 
+                                         right_line=right_line, 
+                                         prev_right=prev_right)
+
+    prev_left = left_line
+    prev_right = right_line
+
+    if middle is None:
+        middle = (left_line[0] * right_line[1] - right_line[0] * left_line[1]) / (left_line[0] - right_line[0])
+
+    return True, left_line[:2], right_line[:2]
+
+
+def handle_lane_transition(turn_state, left_line, right_line):
     # detect start of transition 
-        # when slope is getting lower
+    # when slope is getting lower
     if not turn and left_line[0] > -1 and right_line[0] > 2:
         turn = -1
 
@@ -251,11 +273,11 @@ def preprocess_frames(raw_frames):
         # adjust other lane to detect lines with slope close to 0
     if slope_border == 0:
         # detected new lane line
-        if turn == -1 and left_line[0] < -1.3:
+        if turn == -1 and left_line[0] < -1.2:
             slope_border = prev_left[0] - 0.1
             right_line = prev_left
             slope_right = 2
-        elif turn == 1 and right_line[0] > 1.3:
+        elif turn == 1 and right_line[0] > 1.2:
             slope_border = prev_right[0] + 0.1
             left_line = prev_right
             slope_left = -2
@@ -275,40 +297,6 @@ def preprocess_frames(raw_frames):
         slope_right = 3.5
         turn = 0
 
-    cropped = draw_line(cropped, right_line[:2])
-    cropped = draw_line(cropped, left_line[:2])
-    cropped = draw_lane(cropped, left_line[:2], right_line[:2])
-    #print_img(cropped, 'cropped')
-
-
-    prev_left = left_line
-    prev_right = right_line
-
-    #print(prev_left, prev_right)
-
-    if middle is None:
-        middle = (left_line[0] * right_line[1] - right_line[0] * left_line[1]) / (left_line[0] - right_line[0])
-
-    res_frames[top:, :, :] = cropped
-    #print_img(res_frames, 'frame')
-    return res_frames
-
-
-def detect_lanes(preprocessed_frames):
-    res_frames = preprocessed_frames
-    # How to find best lines?
-        # Canny
-        # Hough Parabula ?? self implement (Omri) or use HoughLines (Mark)
-    # How to detect lane transition?
-        # transform lines from (x,y) to (rho, theta) and detect changes in rho (distance to origin)
-            # Distance is decreasing -> LEFT
-            # Distance is increasing -> RIGHT 
-            # Use threshold to deal with noise
-    # How to follow correct lanes during transition?
-        # Compare to last frame
-        # Lanes change will happen naturally when transition is complete
-    return res_frames
-
 
 def save_frames_to_video(frames, fps):
     video_path = 'lanes.mp4'
@@ -327,20 +315,37 @@ def save_frames_to_video(frames, fps):
 
 if __name__ == '__main__':
 
-    input_video_path = 'video1.mp4'  
-    base = 18  
-    start = base + 2
-    finish = base + 36
-    raw_frames, fps = read_frames_from_video(input_video_path, start, finish)
+    start_time = time()
+    np.random.seed(0)
 
+    input_video_path = 'video1.mp4'
+    start = 0
+    finish = 252
+    
+    raw_frames, fps = read_frames_from_video(input_video_path)
     print(f'[{time() - start_time:.2f}]')
 
     final_frames = []
-    num_frames = (finish - start) * fps
+    start_frame = start * fps
+    finish_frame = finish * fps
+    num_frames = finish_frame - start_frame
     for i, frame in enumerate(raw_frames):
-        pframe = preprocess_frames(frame)
-        pframe = detect_lanes(pframe)
-        final_frames.append(pframe)
+        if i >= finish_frame: break
+        skip = i < start_frame
+
+        cropped_frame, top, mask = preprocess_frames(frame)
+        valid, left_line, right_line = detect_lanes(pframe, skip)
+
+        if valid:
+            
+            cropped_frame = draw_line(cropped_frame, right_line)
+            cropped_frame = draw_line(cropped_frame, left_line)
+            cropped_frame = draw_lane(cropped_frame, left_line, right_line)
+            frame[top:, :, :] = cropped_frame
+
+            frame = detect_transition(frame, turn_state, left_line, right_line)
+
+            final_frames.append(pframe)      
 
         if i % 100 == 0:
             print(f'[{time() - start_time:.2f}] {i}/{num_frames}')
