@@ -344,15 +344,15 @@ if __name__ == '__main__':
     np.random.seed(0)
 
     # video parameters
-    input_video_path = 'original.mp4'
-    output_video_path = 'lanes.mp4'
+    input_video_path = 'Videos/original.mp4'
+    output_video_path = 'Videos/lanes.mp4'
     
     # read frames
     raw_frames, fps = read_frames_from_video(input_video_path)
 
     # process frame-by-frame
     final_frames = []
-    for i, frame in enumerate(raw_frames):
+    for i, frame in enumerate([]):
 
         # preprocess frame
         cropped_frame, top, preprocessed_frame = preprocess_frame(frame)
